@@ -1,0 +1,43 @@
+# 0. Loading packages
+```{r}
+library(edgeR)
+library(data.table)
+
+```
+
+
+# 1. PreProcessing
+### Import the data and creat a DGEList object:
+```{r}
+counts <- read.delim("C:/Users/Po-Kai/Dropbox/Working/Mimulus_project/RNAseq/all_counts.txt", row.names = 1)
+
+d0 <- DGEList(counts)
+
+# Add sample-level info:
+group <- as.factor(c(paste("c",rep(1:9, each=4), sep=""),paste("f",rep(1:9, each=4), sep="")))
+d0$samples$group <- group
+
+ZT_vector <- c(14,17,20,23,2,5,8,11,14)
+ZT <- rep(rep(ZT_vector, each=4),2)
+d0$samples$ZT <- ZT
+
+trt <- as.factor(c(rep(c("c","f"),each=36)))
+d0$samples$trt <- trt
+
+```
+
+### Filter the data:
+Filter low-expressed genes: At least has 1 cpm (~3.4 reads) in one of the 72 samples.
+```{r}
+cutoff <- 1
+drop <- which(apply(cpm(d0), 1, max) < cutoff)
+d_GC <- d0[-drop,] 
+dim(d_GC) # number of genes left
+```
+
+> May be too relaxed. (28140 genes -> 21731 genes)
+
+### Normalized the data
+```{r}
+d_GC <- calcNormFactors(d_GC)
+```
