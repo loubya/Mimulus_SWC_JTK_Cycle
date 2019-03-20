@@ -1,7 +1,6 @@
 # 0. Loading packages
 ```{r}
 library(edgeR)
-library(data.table)
 
 ```
 
@@ -40,4 +39,144 @@ dim(d_GC) # number of genes left
 ### Normalized the data
 ```{r}
 d_GC <- calcNormFactors(d_GC)
+
+cpm_GCfiltered <- as.data.frame(cpm(d_GC))
+
+
 ```
+
+
+### Re-organize the data for the JTK-Cycle
+Not yet
+```{r}
+# Separate the data of constant and fluctuating trt:
+data_c <- cpm_GCfiltered[,1:36]
+data_f <- cpm_GCfiltered[,37:72]
+
+# Rename the colnames:
+cn <- c(paste(rep(paste("ZT", seq(14,by=3,length.out=9), sep=""), each=4),paste("rep", rep(1:4), sep=""), sep="_"))
+colnames(data_c) <- cn
+colnames(data_f) <- cn
+
+```
+
+
+
+# 2. Run the JTK_Cycle
+This part is modified from ¡§Run_JTK_CYCLE (Example2).R¡¨ provided by JTK_Cycle authors.
+
+
+### Set up some variables:
+Set up the working directory for sourcing a script if needed. (Line 1~8 of the original script.)
+
+```{r}
+source("JTK_CYCLEv3.1.R")
+
+project <- "SWC_JTK_Cycle_c"
+
+# This is a setting for preventing some data.frame loading issues.
+options(stringsAsFactors=FALSE)
+
+# Set up the `annot` and `data` which are written in the script we sourced.
+annot <- as.data.frame(rownames(data_c))
+colnames(annot) <- "genes"
+data <- data_c
+
+```
+
+
+### Set the parameters for the analysis:
+```{r}
+# 9 total time points, 4 replicates per time point
+jtkdist(9, 4)
+
+periods <- 5:7       # looking for rhythms between 20-28 hours (i.e. between 5 and 7 time points per cycle).
+
+# 3 is the number of hours between time points
+jtk.init(periods,3) 
+
+```
+
+
+### Run the analysis: 
+```{r}
+cat("JTK analysis started on",date(),"\n")
+flush.console()
+
+st <- system.time({
+  res <- apply(data,1,function(z) {
+    jtkx(z)
+    c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+  })
+  res <- as.data.frame(t(res))
+  bhq <- p.adjust(unlist(res[,1]),"BH")
+  res <- cbind(bhq,res)
+  colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+  results <- cbind(annot,res,data)
+  results <- results[order(res$ADJ.P,-res$AMP),]
+})
+print(st)
+
+```
+
+
+### Export the results:
+```{r}
+save(results,file=paste("JTK",project,"rda",sep="."))
+write.table(results,file=paste("JTK",project,"txt",sep="."),row.names=F,col.names=T,quote=F,sep="\t")
+
+```
+
+
+
+
+###########################################
+Line1-11
+```{r}
+
+source("JTK_CYCLEv3.1.R")
+
+project <- "Example2"
+
+options(stringsAsFactors=FALSE)
+annot <- read.delim("Example2_annot.txt")
+data <- read.delim("Example2_data.txt")
+
+rownames(data) <- data[,1]
+data <- data[,-1]
+```
+
+
+
+```{r}
+
+
+jtkdist(13, 2)       # 13 total time points, 2 replicates per time point
+
+periods <- 5:7       # looking for rhythms between 20-28 hours (i.e. between 5 and 7 time points per cycle).
+jtk.init(periods,4)  # 4 is the number of hours between time points
+
+cat("JTK analysis started on",date(),"\n")
+flush.console()
+
+st <- system.time({
+  res <- apply(data,1,function(z) {
+    jtkx(z)
+    c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+  })
+  res <- as.data.frame(t(res))
+  bhq <- p.adjust(unlist(res[,1]),"BH")
+  res <- cbind(bhq,res)
+  colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+  results <- cbind(annot,res,data)
+  results <- results[order(res$ADJ.P,-res$AMP),]
+})
+print(st)
+
+save(results,file=paste("JTK",project,"rda",sep="."))
+write.table(results,file=paste("JTK",project,"txt",sep="."),row.names=F,col.names=T,quote=F,sep="\t")
+
+
+```
+
+
