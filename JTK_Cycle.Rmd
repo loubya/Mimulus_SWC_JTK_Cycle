@@ -90,7 +90,8 @@ data <- data_c
 # 9 total time points, 4 replicates per time point
 jtkdist(9, 4)
 
-periods <- 5:7       # looking for rhythms between 20-28 hours (i.e. between 5 and 7 time points per cycle).
+# Looking for rhythms of 24 hours. (We used the LD conditions so we are only interested in 24h-rhythms.)
+periods <- 8       
 
 # 3 is the number of hours between time points
 jtk.init(periods,3) 
