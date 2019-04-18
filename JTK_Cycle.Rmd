@@ -47,7 +47,7 @@ cpm_GCfiltered <- as.data.frame(cpm(d_GC))
 
 
 ### Re-organize the data for the JTK-Cycle
-Not yet
+
 ```{r}
 # Separate the data of constant and fluctuating trt:
 data_c <- cpm_GCfiltered[,1:36]
@@ -72,15 +72,15 @@ Set up the working directory for sourcing a script if needed. (Line 1~8 of the o
 ```{r}
 source("JTK_CYCLEv3.1.R")
 
-project <- "SWC_JTK_Cycle_c"
+#project <- "SWC_JTK_Cycle_c"  # I put this in the chunk of "Run the analysis" below.
 
 # This is a setting for preventing some data.frame loading issues.
 options(stringsAsFactors=FALSE)
 
 # Set up the `annot` and `data` which are written in the script we sourced.
-annot <- as.data.frame(rownames(data_c))
+annot <- as.data.frame(rownames(data_c))  # The annot is the same for both c and f conditions.
 colnames(annot) <- "genes"
-data <- data_c
+#data <- data_c # I put this in the chunk of "Run the analysis" below.
 
 ```
 
@@ -100,7 +100,13 @@ jtk.init(periods,3)
 
 
 ### Run the analysis: 
+1. Run the constant tmp first:
 ```{r}
+# Set up the `project` and `data`
+project <- "SWC_JTK_Cycle_c"
+data <- data_c
+
+# Run
 cat("JTK analysis started on",date(),"\n")
 flush.console()
 
@@ -113,50 +119,31 @@ st <- system.time({
   bhq <- p.adjust(unlist(res[,1]),"BH")
   res <- cbind(bhq,res)
   colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
-  results <- cbind(annot,res,data)
-  results <- results[order(res$ADJ.P,-res$AMP),]
+  results_c <- cbind(annot,res,data)
+  results_c <- results_c[order(res$ADJ.P,-res$AMP),]
 })
 print(st)
 
-```
 
-
-### Export the results:
-```{r}
-save(results,file=paste("JTK",project,"rda",sep="."))
-write.table(results,file=paste("JTK",project,"txt",sep="."),row.names=F,col.names=T,quote=F,sep="\t")
+# Export the results:
+#save(results_c,file=paste("JTK",project,"rda",sep="."))
+#write.table(results_c,file=paste("JTK",project,"txt",sep="."),row.names=F,col.names=T,quote=F,sep="\t")
 
 ```
+- Observations: 21,731
+- Variables: 42 (36+6)
+
+After checking the results with `tail(results_c)`, we know that we have to filter the results by BH.Q or ADJ.P!
 
 
 
-
-###########################################
-Line1-11
+2. Run the fluctuating tmp:
 ```{r}
+# Set up the `project` and `data`
+project <- "SWC_JTK_Cycle_f"
+data <- data_f
 
-source("JTK_CYCLEv3.1.R")
-
-project <- "Example2"
-
-options(stringsAsFactors=FALSE)
-annot <- read.delim("Example2_annot.txt")
-data <- read.delim("Example2_data.txt")
-
-rownames(data) <- data[,1]
-data <- data[,-1]
-```
-
-
-
-```{r}
-
-
-jtkdist(13, 2)       # 13 total time points, 2 replicates per time point
-
-periods <- 5:7       # looking for rhythms between 20-28 hours (i.e. between 5 and 7 time points per cycle).
-jtk.init(periods,4)  # 4 is the number of hours between time points
-
+# Run
 cat("JTK analysis started on",date(),"\n")
 flush.console()
 
@@ -169,15 +156,110 @@ st <- system.time({
   bhq <- p.adjust(unlist(res[,1]),"BH")
   res <- cbind(bhq,res)
   colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
-  results <- cbind(annot,res,data)
-  results <- results[order(res$ADJ.P,-res$AMP),]
+  results_f <- cbind(annot,res,data)
+  results_f <- results_f[order(res$ADJ.P,-res$AMP),]
 })
 print(st)
 
-save(results,file=paste("JTK",project,"rda",sep="."))
-write.table(results,file=paste("JTK",project,"txt",sep="."),row.names=F,col.names=T,quote=F,sep="\t")
 
+# Export the results:
+#save(results_f,file=paste("JTK",project,"rda",sep="."))
+#write.table(results_f,file=paste("JTK",project,"txt",sep="."),row.names=F,col.names=T,quote=F,sep="\t")
 
 ```
+
+3. Filter the data:
+```{r}
+# Filter for the sig traits 
+## Modified Dan's code:
+#sig_traits = function(results,p_value_cutoff){
+#  return(rownames(results)[results[,"BH.Q"] < p_value_cutoff])
+#}
+
+p_value_cutoff <- 1e-3
+results_c_filtered <- subset(results_c, BH.Q < p_value_cutoff)
+results_f_filtered <- subset(results_f, BH.Q < p_value_cutoff)
+
+```
+1. Using 1e-3 as the cutoff to filter my data, I got 1478 and 2795 genes under c and f conditions, respectively.
+
+
+# 3. Heatmap:
+Using pheatmap:
+
+```{r}
+library(pheatmap)
+```
+
+### Create the data matrix
+```{r}
+results_c_filtered = results_c_filtered[order(results_c_filtered$LAG),]
+results_f_filtered = results_f_filtered[order(results_f_filtered$LAG),]
+data_matrix_c <- data.matrix(results_c_filtered[,-c(1:6)])
+data_matrix_f <- data.matrix(results_f_filtered[,-c(1:6)])
+
+colfunc <- colorRampPalette(c("blue", "yellow"))
+
+
+pheatmap(data_matrix_c, scale="row", color=colfunc(15), cluster_rows=FALSE, cluster_cols=FALSE,show_rownames = F )
+pheatmap(data_matrix_f, scale="row", color=colfunc(15), cluster_rows=FALSE, cluster_cols=FALSE,show_rownames = F )
+
+```
+
+# 4. Scatter plot:
+```{r}
+f_scatter <- results_f_filtered[1:6]
+f_scatter$group <- c("f")
+
+c_scatter <- results_c_filtered[1:6]
+c_scatter$group <- c("c")
+
+full_scatter <- rbind(c_scatter, f_scatter)
+
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+
+#data_subset_norm <- t(apply(data_subset, 1, cal_z_score))
+
+
+# LAG vs. AMP
+library(ggplot2)
+
+ggplot(full_scatter, aes(x=LAG, y=AMP, color=group)) +
+  geom_point()
+
+
+# LAG vs. ADJ.P
+ggplot(full_scatter, aes(x=LAG, y=ADJ.P, color=group)) +
+  geom_point()
+
+```
+1. I can not use the AMP without scaling for creating the plot! The variation is too big!
+
+
+```{r}
+unique(results_c$LAG)
+
+table(results_c$LAG)
+
+plot(table(results_c$LAG))
+plot(table(results_f$LAG))
+
+plot(density(results_c$AMP))
+plot(density(log(results_c$AMP)))
+lines(density(log(results_f$AMP)),col=2)
+summary(results_c$AMP)
+```
+
+
+
+
+
+
+
+
+
+
 
 

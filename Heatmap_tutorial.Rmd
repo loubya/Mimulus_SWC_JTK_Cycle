@@ -1,0 +1,149 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+Going through the tutoral of drawing heatmap with R. From Dave Tang's blog:
+https://davetang.org/muse/2010/12/06/making-a-heatmap-with-r/
+
+Using the TagSeqExample.tab file from DESeq.
+
+# 1. Using the basic `heatmap`function:
+```{r}
+#install DESeq if necessary
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("DESeq")
+
+# Load DESeq:
+library("DESeq")
+
+# Import the TagSeqExample.tab file from DESeq:
+## Finds the full file names of files in DEseq packages:
+example_file <- system.file ("extra/TagSeqExample.tab", package="DESeq")
+## Load the data: (He delete the rownames.)
+data <- read.delim(example_file, header=T, row.names="gene")
+
+# Check the data:
+head(data)
+nrow(data)
+## Check distribution of row sums
+quantile(rowSums(data))
+   
+
+
+# Create a workable set
+data_subset <- data[rowSums(data)>50000,]
+nrow(data_subset)
+## Create the data matrix for heatmap:
+data_matrix <- data.matrix(data_subset)
+
+# Generate the heatmap
+heatmap(data_matrix)
+```
+
+# 2. Using the `heatmap.2`: 
+```{r}
+# install if necessary
+# install.packages("gplots")
+library(gplots)
+heatmap.2(data_matrix)
+
+# Center the values and scaled in row direction:
+heatmap.2(data_matrix,scale="row")
+
+# Using a red and blue colour scheme without traces and scaling each row:
+library("RColorBrewer")
+heatmap.2(data_matrix,col=brewer.pal(11,"RdBu"),scale="row", trace="none")
+
+```
+
+# 3. Using pheatmap package (basic):
+From the other assay in Tang's blog.
+https://davetang.org/muse/2018/05/15/making-a-heatmap-in-r-with-the-pheatmap-package/
+
+```{r}
+# load package
+library(pheatmap)
+
+# The default (w/o scaling)
+pheatmap(data_matrix)
+
+# Scale in row direction:
+pheatmap(data_matrix, scale="row")
+
+```
+
+
+# 4. Using pheatmap package (advanced):
+The power of pheatmap: the ability to add annotations to the rows and columns!
+```{r}
+# Using `dendextend` to creat hierarchical clustering for deciding how to color the plot: (You can also extract the information directly from pheatmap!)
+my_hclust_gene <- hclust(dist(data_matrix), method = "complete")
+## Load package
+library(dendextend)
+## Make the dendrogram: (clustering in the same manner as performed by pheatmap)
+as.dendrogram(my_hclust_gene) %>%
+  plot(horiz = TRUE)
+
+# Define 2 sub-clusters by cutting the tree: (the cluster number: k=2)
+my_gene_col <- cutree(tree = as.dendrogram(my_hclust_gene), k = 2)
+my_gene_col
+## Annotate the genes by the sub-clusters:
+my_gene_col <- data.frame(cluster = ifelse(test = my_gene_col == 1, yes = "cluster 1", no = "cluster 2"))
+head(my_gene_col)
+
+
+# Add more annotations:
+## Add some random annotations:
+set.seed(1984)
+my_random <- as.factor(sample(x = 1:2, size = nrow(my_gene_col), replace = TRUE))
+my_gene_col$random <- my_random
+head(my_gene_col)
+## Add the column annotations:
+my_sample_col <- data.frame(sample = rep(c("tumour", "normal"), c(4,2)))
+row.names(my_sample_col) <- colnames(data_matrix)
+
+
+# Create the heatmap with all annotations!
+pheatmap(data_matrix, annotation_row = my_gene_col, annotation_col = my_sample_col)
+
+
+# Other useful feature: breaking up the heatmap!
+pheatmap(data_matrix,
+         annotation_row = my_gene_col,
+         annotation_col = my_sample_col,
+         cutree_rows = 2,
+         cutree_cols = 2)
+
+```
+
+# 5. Others
+Extract the hierarchical clustering from pheatmap!
+```{r}
+# use silent = TRUE to suppress the plot
+my_heatmap <- pheatmap(data_matrix, silent = TRUE)
+ 
+# results are stored as a list
+class(my_heatmap)
+names(my_heatmap)
+
+my_heatmap$tree_row %>%
+  as.dendrogram() %>%
+  plot(horiz = TRUE)
+```
+
+Saving the heatmap as a PNG file:
+```{r}
+save_pheatmap_png <- function(x, filename, width=1200, height=1000, res = 150) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+ 
+#save_pheatmap_png(my_heatmap, "my_heatmap.png")
+```
+
+Note:
+> I acciednetally found pheatmap can accept data.frame.
+
+
