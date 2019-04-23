@@ -1,3 +1,6 @@
+The goal of this script is to use the JTK_Cycle to discover the rhythmic transcripts in my data, and to analyze if there is any difference between constant and fluctuating temperature.
+
+
 # 0. Loading packages
 ```{r}
 library(edgeR)
@@ -12,11 +15,13 @@ counts <- read.delim("C:/Users/Po-Kai/Dropbox/Working/Mimulus_project/RNAseq/all
 
 d0 <- DGEList(counts)
 
+
 # Add sample-level info:
 group <- as.factor(c(paste("c",rep(1:9, each=4), sep=""),paste("f",rep(1:9, each=4), sep="")))
 d0$samples$group <- group
 
-ZT_vector <- c(14,17,20,23,2,5,8,11,14)
+#ZT_vector <- c(14,17,20,23,2,5,8,11,14)
+ZT_vector <- c(-10,-7,-4,-1,2,5,8,11,14)
 ZT <- rep(rep(ZT_vector, each=4),2)
 d0$samples$ZT <- ZT
 
@@ -25,36 +30,36 @@ d0$samples$trt <- trt
 
 ```
 
+
 ### Filter the data:
-Filter low-expressed genes: At least has 1 cpm (~3.4 reads) in one of the 72 samples.
+Use the `filterByExpr` function in the `edgeR` package to do the filtering. (20190419)
 ```{r}
-cutoff <- 1
-drop <- which(apply(cpm(d0), 1, max) < cutoff)
-d_GC <- d0[-drop,] 
-dim(d_GC) # number of genes left
+keep.exprs <- filterByExpr(d0,group=d0$samples$group)
+#keep.exprs <- filterByExpr(d0)
+# These two are the same if I've set the `group=d0$samples$group`.
+
+d0_filterByExpr <- d0[keep.exprs, , keep.lib.sizes=FALSE]
+dim(d0_filterByExpr)
 ```
 
-> May be too relaxed. (28140 genes -> 21731 genes)
 
-### Normalized the data
+### Normalized the data and caculate the cpm
 ```{r}
-d_GC <- calcNormFactors(d_GC)
+d0_filterByExpr <- calcNormFactors(d0_filterByExpr)
 
-cpm_GCfiltered <- as.data.frame(cpm(d_GC))
-
-
+cpm_filtered <- as.data.frame(cpm(d0_filterByExpr))
 ```
 
 
 ### Re-organize the data for the JTK-Cycle
-
 ```{r}
 # Separate the data of constant and fluctuating trt:
-data_c <- cpm_GCfiltered[,1:36]
-data_f <- cpm_GCfiltered[,37:72]
+data_c <- cpm_filtered[,1:36]
+data_f <- cpm_filtered[,37:72]
 
 # Rename the colnames:
-cn <- c(paste(rep(paste("ZT", seq(14,by=3,length.out=9), sep=""), each=4),paste("rep", rep(1:4), sep=""), sep="_"))
+#cn <- c(paste(rep(paste("ZT", seq(14,by=3,length.out=9), sep=""), each=4),paste("rep", rep(1:4), sep=""), sep="_"))
+cn <- c(paste(rep(paste("ZT", seq(-10,by=3,length.out=9), sep=""), each=4),paste("rep", rep(1:4), sep=""), sep="_"))
 colnames(data_c) <- cn
 colnames(data_f) <- cn
 
@@ -90,8 +95,10 @@ colnames(annot) <- "genes"
 # 9 total time points, 4 replicates per time point
 jtkdist(9, 4)
 
+
 # Looking for rhythms of 24 hours. (We used the LD conditions so we are only interested in 24h-rhythms.)
 periods <- 8       
+
 
 # 3 is the number of hours between time points
 jtk.init(periods,3) 
@@ -136,7 +143,6 @@ print(st)
 After checking the results with `tail(results_c)`, we know that we have to filter the results by BH.Q or ADJ.P!
 
 
-
 2. Run the fluctuating tmp:
 ```{r}
 # Set up the `project` and `data`
@@ -168,6 +174,7 @@ print(st)
 
 ```
 
+
 3. Filter the data:
 ```{r}
 # Filter for the sig traits 
@@ -182,29 +189,38 @@ results_f_filtered <- subset(results_f, BH.Q < p_value_cutoff)
 
 ```
 1. Using 1e-3 as the cutoff to filter my data, I got 1478 and 2795 genes under c and f conditions, respectively.
+> Update (20190423, using filterByExpr) I got 1557 and 2945 genes under c and f conditions, respectively.
 
 
 # 3. Heatmap:
 Using pheatmap:
-
 ```{r}
 library(pheatmap)
 ```
 
+
 ### Create the data matrix
 ```{r}
+# Sort the data according to their LAG (phase).
 results_c_filtered = results_c_filtered[order(results_c_filtered$LAG),]
 results_f_filtered = results_f_filtered[order(results_f_filtered$LAG),]
+
+
+# Matrix:
 data_matrix_c <- data.matrix(results_c_filtered[,-c(1:6)])
 data_matrix_f <- data.matrix(results_f_filtered[,-c(1:6)])
 
+
+# Color
 colfunc <- colorRampPalette(c("blue", "yellow"))
 
 
+# Heatmap!
 pheatmap(data_matrix_c, scale="row", color=colfunc(15), cluster_rows=FALSE, cluster_cols=FALSE,show_rownames = F )
 pheatmap(data_matrix_f, scale="row", color=colfunc(15), cluster_rows=FALSE, cluster_cols=FALSE,show_rownames = F )
 
 ```
+
 
 # 4. Scatter plot:
 ```{r}
@@ -237,27 +253,36 @@ ggplot(full_scatter, aes(x=LAG, y=ADJ.P, color=group)) +
 ```
 1. I can not use the AMP without scaling for creating the plot! The variation is too big!
 
+2. My plots didn't provide useful info...
 
+
+# 5. Discuss with Dan: We would like to know the distribution of the phases
 ```{r}
-unique(results_c$LAG)
+unique(results_c_filtered$LAG)
+table(results_c_filtered$LAG)
 
-table(results_c$LAG)
 
-plot(table(results_c$LAG))
-plot(table(results_f$LAG))
+# Visualize the distribution of the phases:
+plot(table(results_c_filtered$LAG))
+plot(table(results_f_filtered$LAG))
 
-plot(density(results_c$AMP))
-plot(density(log(results_c$AMP)))
-lines(density(log(results_f$AMP)),col=2)
-summary(results_c$AMP)
+
+# Check the AMP:
+plot(density(results_c_filtered$AMP))
+plot(density(log(results_c_filtered$AMP)))
+lines(density(log(results_f_filtered$AMP)),col=2)
+
+
+summary(results_c_filtered$AMP)
+summary(results_f_filtered$AMP)
 ```
+1. The distribution of the phases is consistent with the heatmap: there are 2 peaks in f condition, but the c condition only has a peak.
 
+2. The program may fit the 3/2=1.5 into each time point I collected the samples. The numbers of those points are always lower.
 
+3. The AMP is slightly smaller in f condition.
 
-
-
-
-
+4. Note: The original version Dan and I forgot to use the filtered results.
 
 
 
