@@ -285,6 +285,74 @@ summary(results_f_filtered$AMP)
 4. Note: The original version Dan and I forgot to use the filtered results.
 
 
+# 6. Check the heatmap pattern again:
 
+6.1 Checking the heatmap pattern of the 2945 rhythmic genes detected using f samples under the c conditon:
+```{r}
+f.filtered_c = results_c[rownames(results_c) %in% results_f_filtered$genes,]
+
+
+# Sort the data according to their LAG (phase).
+f.filtered_c = f.filtered_c[order(f.filtered_c$LAG),]
+
+
+# Matrix:
+f.filtered_c.matrix <- data.matrix(f.filtered_c[,-c(1:6)])
+
+
+# Color
+colfunc <- colorRampPalette(c("blue", "yellow"))
+
+
+# Heatmap!
+pheatmap(f.filtered_c.matrix, scale="row", color=colfunc(15), cluster_rows=FALSE, cluster_cols=FALSE,show_rownames = F )
+
+
+# Bar chart:
+plot(table(f.filtered_c$LAG))
+
+
+```
+
+
+6.2 Checking the heatmap pattern of the 1557 rhythmic genes detected using c samples under the f conditon:
+```{r}
+c.filtered_f = results_f[rownames(results_f) %in% results_c_filtered$genes,]
+
+
+# Sort the data according to their LAG (phase).
+c.filtered_f = c.filtered_f[order(c.filtered_f$LAG),]
+
+
+# Matrix:
+c.filtered_f.matrix <- data.matrix(c.filtered_f[,-c(1:6)])
+
+
+# Color
+colfunc <- colorRampPalette(c("blue", "yellow"))
+
+
+# Heatmap!
+pheatmap(c.filtered_f.matrix, scale="row", color=colfunc(15), cluster_rows=FALSE, cluster_cols=FALSE,show_rownames = F )
+
+
+# Bar chart:
+plot(table(c.filtered_f$LAG))
+
+
+```
+
+
+# 7. Venn Diagram:
+
+```{r}
+library(VennDiagram)
+library(grid)
+
+venn.plot <- venn.diagram(list(rownames(results_c_filtered), rownames(results_f_filtered)), NULL, lty=0.1,fill=c("light blue", "pink"), alpha=c(0.5,1), cex = 1.5, cat.fontface=20, category.names=c("Constant tmp", "Fluctuating tmp"), margin = 0.05, cat.pos=c(-30,30), cat.dist=0.05)
+
+
+grid.draw(venn.plot)
+```
 
 
