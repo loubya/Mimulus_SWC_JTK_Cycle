@@ -11,7 +11,9 @@ library(edgeR)
 # 1. PreProcessing
 ### Import the data and creat a DGEList object:
 ```{r}
-counts <- read.delim("C:/Users/Po-Kai/Dropbox/Working/Mimulus_project/RNAseq/all_counts.txt", row.names = 1)
+#counts <- read.delim("C:/Users/Po-Kai/Dropbox/Working/Mimulus_project/RNAseq/all_counts.txt", row.names = 1)
+counts <- read.delim("C:/Users/Po-Kai/Box Sync/Mimulus_swc_timecourse_2018/RNAseq/all_counts.txt", row.names = 1)
+
 
 d0 <- DGEList(counts)
 
@@ -267,6 +269,24 @@ plot(table(results_c_filtered$LAG))
 plot(table(results_f_filtered$LAG))
 
 
+#New version: (changing the x label)
+bar_x <- as.data.frame(table(results_c_filtered$LAG))
+bar_x$Var1 <- seq(from=-10,by=1.5,length.out=16)
+colnames(bar_x)[colnames(bar_x) == 'Var1'] <- "CT_group"
+bar_x$CT_group <- as.factor(bar_x$CT_group)
+bar <- ggplot(data=bar_x, aes(x=CT_group, y=Freq)) +
+  geom_bar(stat="identity",width=0.5)
+bar
+
+
+bar_x <- as.data.frame(table(results_f_filtered$LAG))
+bar_x$Var1 <- seq(from=-10,by=1.5,length.out=16)
+colnames(bar_x)[colnames(bar_x) == 'Var1'] <- "CT_group"
+bar_x$CT_group <- as.factor(bar_x$CT_group)
+bar <- ggplot(data=bar_x, aes(x=CT_group, y=Freq)) +
+  geom_bar(stat="identity",width=0.5)
+bar
+
 # Check the AMP:
 plot(density(results_c_filtered$AMP))
 plot(density(log(results_c_filtered$AMP)))
@@ -311,6 +331,14 @@ pheatmap(f.filtered_c.matrix, scale="row", color=colfunc(15), cluster_rows=FALSE
 # Bar chart:
 plot(table(f.filtered_c$LAG))
 
+bar_x <- as.data.frame(table(f.filtered_c$LAG))
+bar_x$Var1 <- seq(from=-10,by=1.5,length.out=16)
+colnames(bar_x)[colnames(bar_x) == 'Var1'] <- "CT_group"
+bar_x$CT_group <- as.factor(bar_x$CT_group)
+bar <- ggplot(data=bar_x, aes(x=CT_group, y=Freq)) +
+  geom_bar(stat="identity",width=0.5)
+bar
+
 
 ```
 
@@ -339,6 +367,14 @@ pheatmap(c.filtered_f.matrix, scale="row", color=colfunc(15), cluster_rows=FALSE
 # Bar chart:
 plot(table(c.filtered_f$LAG))
 
+#New version: (changing the x label)
+bar_x <- as.data.frame(table(c.filtered_f$LAG))
+bar_x$Var1 <- seq(from=-10,by=1.5,length.out=16)
+colnames(bar_x)[colnames(bar_x) == 'Var1'] <- "CT_group"
+bar_x$CT_group <- as.factor(bar_x$CT_group)
+bar <- ggplot(data=bar_x, aes(x=CT_group, y=Freq)) +
+  geom_bar(stat="identity",width=0.5)
+bar
 
 ```
 
