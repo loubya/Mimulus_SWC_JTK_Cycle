@@ -1,0 +1,1572 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+The goal of this analysis is to perform a "circadian" or periodicity analysis of the VarTemp experiment
+
+I will perform separate analysis of each treatment x genotype x time
+
+Try using `JTK_cycle_v2`
+
+load data:
+```{r}
+load('Sleuth_exp.RData')
+library(cowplot)
+library(reshape)
+sample_info = sub_sample_info
+
+sample_info$ExpID = with(sample_info,paste(Genotype,Treatment,Sampling.Day,sep='_'))
+Expts = as.character(unique(sample_info$ExpID))
+Expt_design = data.frame(Expts,do.call(rbind,lapply(Expts,function(x) strsplit(x,'_')[[1]])))
+colnames(Expt_design) = c('ExpID','Genotype','Treatment','Sampling.Day')
+Expt_design = Expt_design[with(Expt_design,order(Treatment,Genotype)),]
+Expts = Expt_design$ExpID
+sample_info$ExpID = factor(sample_info$ExpID,levels = Expts)
+
+sample_info = sample_info[with(sample_info,order(Treatment,Sampling.Day,Genotype)),]
+
+exp = exp[,sample_info$sample]
+
+temps = read.delim('~/Documents/Arabidopsis/Lianas_experiment/Bolting/Data/ACE_temp_profile.txt')
+ACE_22VarLD = subset(temps,Treatment == '22VarLD')[,-1]
+ACE_22VarLD$Hour = 0
+ACE_22VarLD = rbind(data.frame(Temp=12,Duration=0,Hour=0),ACE_22VarLD)
+ACE_22VarLD$Hour = cumsum(ACE_22VarLD$Duration)
+ACE_22VarLD_shift = ACE_22VarLD[-1,]
+ACE_22VarLD_shift$Hour = ACE_22VarLD$Hour[-nrow(ACE_22VarLD)]
+ACE_22VarLD = rbind(ACE_22VarLD,ACE_22VarLD_shift)
+ACE_22VarLD = ACE_22VarLD[order(ACE_22VarLD$Hour),]
+
+gene_list = read.csv('RNAseq_analysis/Gene_list.csv',stringsAsFactors=F)
+```
+
+Sum up genes by transcripts
+```{r}
+transcripts = rownames(exp)
+genesIDs = sapply(as.character(transcripts),function(x) strsplit(x,'.',fixed=T)[[1]][1])
+genes = unique(genesIDs)
+gene_exp = do.call(rbind,tapply(1:nrow(exp),genesIDs,function(x) colSums(exp[x,,drop=F])))
+```
+
+Figure out a variance stabilizing transform (edgeR / voom)
+```{r}
+# X = model.matrix(~ExpID:ZT,sample_info)
+# X = X[,-ncol(X)]
+# H = X %*% solve(t(X) %*% X) %*% t(X) 
+#
+# the following are the same
+# trans = function(x) cpm(gene_exp,lib.size = mean(colSums(gene_exp)),log = T,prior.count = 1)
+# trans = function(x) log2(gene_exp + 1)
+# 
+# fitted = H %*% t(trans(gene_exp))
+# s_e = apply(trans(gene_exp) - t(fitted),1,sd)
+# mean = rowMeans(trans(gene_exp))
+# 
+# i = sample(1:length(mean),1000)
+# plot(mean[i],s_e[i])
+```
+
+```{r}
+library(edgeR)
+log2_gene_exp = log2(gene_exp+1)
+log2_gene_exp = log2_gene_exp[rowMeans(gene_exp) > 1,]
+gene_list = gene_list[gene_list$ID %in% rownames(log2_gene_exp),]
+```
+
+JTK analysis by treatment:genotype:time
+```{r}
+# Loading JTK_Cycle functions
+source('JTK_cycle/JTKversion3/JTK_CYCLEv3.1.R')
+
+# Dan combinded the codes in "Run_JTK_CYCLE (Example2)" to make a function:
+JTK_fun = function(data,sample_info){
+  Expts = levels(sample_info$ExpID)
+  
+  # Create an empty array
+  results = array(NA,dim = c(nrow(data),length(Expts),4), dimnames = list(rownames(data),Expts,c('BH.Q','ADJ.P','LAG','AMP')))
+  
+  for(expt in Expts) {
+    sub_sample_info = droplevels(subset(sample_info,ExpID == expt))
+    
+    expt_data = data[,sub_sample_info$sample]
+    
+    group_sizes = summary(sub_sample_info$ZT)
+    
+    # Set up 2 parameters: Line 12 and 15 of the original script
+    jtkdist(length(group_sizes),group_sizes)  
+    jtk.init(6,4)
+    
+    # Form Line 21 of the original script
+    res <- apply(expt_data,1,function(z) {
+              jtkx(z)
+              c(JTK.ADJP,JTK.PERIOD,JTK.LAG,JTK.AMP)
+            })
+    res <- as.data.frame(t(res))
+    bhq <- p.adjust(unlist(res[,1]),"BH")
+    res <- cbind(bhq,res)
+    colnames(res) <- c("BH.Q","ADJ.P","PER","LAG","AMP")
+    
+    # Dan only extract "BH.Q","ADJ.P","LAG", and "AMP" because he set PER as 24h.
+    results[,expt,] = as.matrix(res[,c(1,2,4,5)])
+  }
+  return(results)
+}
+
+# Filter for the sig traits 
+sig_traits = function(results,p_value_cutoff){
+  return(rownames(results)[apply(results[,,"BH.Q"],1,min) < p_value_cutoff])
+}
+
+order_traits = function(results,lag_cols=1){
+  return(rownames(results)[order(rowMeans(results[,lag_cols,'LAG',drop=F]))])
+}
+
+get_std_mean_data = function(data,groups){
+  means = do.call(cbind,tapply(1:ncol(data),groups,function(x) rowMeans(data[,x])))
+  std_data = data - (means[,groups] - rowMeans(means))
+  std_data
+}
+
+get_std_data = function(data,groups){
+  std_data = data - do.call(cbind,tapply(1:ncol(data),groups,function(x) rowMeans(data[,x])))[,groups]
+  std_data = std_data / do.call(cbind,tapply(1:ncol(data),groups,function(x) apply(data[,x],1,sd)))[,groups]
+  return(std_data)
+}
+
+get_amp_effects = function(results){
+  amp_effects = t(apply(results[,,'AMP'],1,function(x) summary(lm(x~Genotype + Treatment + Sampling.Day,Expt_design))$coef[3,c(1,4)]))
+  return(amp_effects)
+}
+get_lag_effects = function(results){
+  lag_effects = t(apply(results[,,'LAG'],1,function(x) summary(lm(x~Genotype + Treatment + Sampling.Day,Expt_design))$coef[3,c(1,4)]))
+  return(lag_effects)
+}
+
+get_top_TRT_amp = function(results,sign = 1,n = 20){
+  
+  return(results[order(sign*result)])
+}
+```
+
+Plots
+```{r}
+trait_plot = function(trait,std_data,sample_info, name= NULL,lineType = NULL){
+  if(is.null(name)) name = trait
+  sample_info$Trait = std_data[trait,sample_info$sample]
+  sample_info$ZT = as.numeric(as.character(sample_info$ZT))
+  sample_info24 = subset(sample_info,ZT==0)
+  sample_info24$ZT = 24
+  sample_info = rbind(sample_info,sample_info24)
+  # ZTs = c(0,4,8,12,16,20,24)
+  # sample_info$ZT = ZTs#factor(sample_info$ZT,levels = ZTs)
+  # 
+  summary_data = aggregate(sample_info$Trait,list(ZT = sample_info$ZT,Genotype = sample_info$Genotype,ExpID = sample_info$ExpID,Treatment = sample_info$Treatment),mean)
+  summary_data$Trait = summary_data$x
+  if(is.null(lineType)){
+    summary_data$linetype = '1'
+  } else{
+    summary_data$linetype = summary_data[[lineType]]
+  }
+  
+	light = data.frame(ZT = 0,xmin = c(0,16),xmax = c(16,24),ymin=rep(0,2),ymax = rep(max(sample_info$Trait),2),light=factor(c(1,0)),Hour=1,Temp=1)
+  p = ggplot(sample_info,aes(x=ZT))
+  p = p + geom_line(data = summary_data,aes(x=ZT,y=Trait, color = Treatment,group = ExpID,linetype = linetype),size=1) + ggtitle(name) + xlab('') +ylab('Expression') 
+  p = p + geom_rect(data=light,aes(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax,fill=light),alpha = 0.3) + scale_fill_manual(values=c('0'='grey50','1'=NA))
+  p = p + theme(axis.line.x = element_line(size=.7))+ theme(axis.line.y = element_line(size=.7))+ theme(legend.position = 'none')
+  p = p + xlim(c(0,24)) + expand_limits(y=0)
+  print(p)
+  invisible(p)
+}
+```
+
+```{r,fig.width=3.5,fig.height=3.5}
+summary_fun = function(sample_info,log=T){
+  transform = function(x) x
+  if(log) transform = function(x) log2(x+1)
+  itrans = function(x) x
+  if(log) itrans = function(x) 2^(x)-1
+  summary_data    = aggregate(transform(sample_info$Trait),list(ZT = sample_info$ZT,ExpID = sample_info$ExpID,Treatment = sample_info$Treatment),mean)
+  summary_data$SE = aggregate(transform(sample_info$Trait),list(ZT = sample_info$ZT,ExpID = sample_info$ExpID,Treatment = sample_info$Treatment),function(x) sd(x)/sqrt(length(x)))$x
+  summary_data$Trait  = itrans(summary_data$x)
+  summary_data$SE_max = itrans(summary_data$x+2*summary_data$SE)
+  summary_data$SE_min = itrans(summary_data$x-2*summary_data$SE)
+  summary_data
+}
+trait_plot_dots = function(trait,std_data,sample_info,name = NULL,log=T){
+  if(is.null(name)) name = trait
+  sample_info$Trait = std_data[trait,sample_info$sample]
+  sample_info$ZT = as.numeric(as.character(sample_info$ZT))
+  sample_info24 = subset(sample_info,ZT==0)
+  sample_info24$ZT = 24
+  sample_info = rbind(sample_info,sample_info24)
+  # ZTs = c(0,4,8,12,16,20,24)
+  # sample_info$ZT = factor(sample_info$ZT,levels = ZTs)
+  # 
+  summary_data = summary_fun(sample_info,log=log)
+  
+	light = data.frame(ZT = 0,xmin = c(0,16),xmax = c(16,24),ymin=rep(min(sample_info$Trait),2),ymax = rep(max(sample_info$Trait),2),light=factor(c(1,0)),Hour=1,Temp=1)
+	# light = data.frame(ZT = 0,xmin = factor(c(0,16),levels = ZTs),xmax = factor(c(16,24),levels = ZTs),ymin=rep(min(sample_info$Trait),2),ymax = rep(max(sample_info$Trait),2),light=factor(c(1,0)),Hour=1,Temp=1)
+  p = ggplot(sample_info,aes(x=ZT))
+  p = p + geom_point(aes(x=ZT,y=Trait,color = Treatment))
+  # p = p + geom_smooth(aes(x=ZT,y=Trait,color = Treatment,group = Treatment),span=0.5)
+  p = p + geom_ribbon(data = summary_data,aes(ymin = SE_min,ymax = SE_max,group = ExpID),fill = 'grey70',alpha = 0.5)
+  p = p + geom_line(data = summary_data,aes(x=ZT,y=Trait, color = Treatment,group = ExpID),size=1) 
+  p = p + geom_rect(data=light,aes(xmin=xmin,xmax=xmax,ymin=ymin,ymax=ymax,fill=light),alpha = 0.3) + scale_fill_manual(values=c('0'='grey50','1'=NA))
+  p = p + theme(axis.line.x = element_line(size=.7))+ theme(axis.line.y = element_line(size=.7))+ theme(legend.position = 'none')
+  # p = p + xlim(c(0,24))
+  p = p + xlab('') +ylab('Expression')  + ggtitle(name)
+  print(p)
+  return(p)
+}
+
+groups = sample_info$Sampling.Day
+gene = 'FLM';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'FLM';trait_plot(subset(gene_list,Gene==gene)$ID,2^get_std_data(log2_gene_exp,groups),sample_info,name=gene)
+gene = expression(paste('FLM-',beta));trait_plot(paste0(subset(gene_list,Gene=='FLM')$ID,'.4'),2^get_std_mean_data(log2(exp+1),groups),sample_info,name=gene)
+gene = 'FLC';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,transform(sample_info,Genotype = factor(Genotype,levels = c('ColFRI','Col'))),name=gene,lineType = 'Genotype')
+gene = 'SVP';trait_plot(subset(gene_list,Gene==gene)$ID,2^get_std_mean_data(log2_gene_exp,groups),sample_info,name=gene)
+gene = 'PIF4';trait_plot(subset(gene_list,Gene==gene)$ID,2^get_std_mean_data(log2_gene_exp,groups),sample_info,name=gene)
+gene = 'CO';trait_plot(subset(gene_list,Gene==gene)$ID,2^get_std_mean_data(log2_gene_exp,groups),sample_info,name=gene)
+gene = 'FT';p3 = trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene,'Genotype')
+gene = 'LHY';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene)
+gene = 'PRR5';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene)
+gene = 'LUX';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene)
+save_plot(p3,file = 'FT_ConVar_Col_FRI.pdf')
+
+gene = 'SVP';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene)
+gene = 'PIF4';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene)
+gene = 'CO';trait_plot(subset(gene_list,Gene==gene)$ID,gene_exp,sample_info,name=gene)
+
+p1 = trait_plot_dots(subset(gene_list,Gene=='FT')$ID,gene_exp,subset(sample_info,Genotype == 'Col' & Treatment == 'Con'),'FT');p1
+p2 = trait_plot_dots(subset(gene_list,Gene=='FT')$ID,gene_exp,subset(sample_info,Genotype == 'ColFRI' & Sampling.Day == "2014-03-10"),'FT');p2
+save_plot(p1,file = 'FT_Con_Col.pdf')
+save_plot(p2,file = 'FT_ConVar_ColFRI.pdf')
+
+gene = 'LHY';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'CCA1';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'PRR5';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'PRR7';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'RVE4';trait_plot_dots('AT5G02840',gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'RVE6';trait_plot_dots('AT5G52660',gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'RVE8';trait_plot_dots('AT3G09600',gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'LUX';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'ELF4';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'GI';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+gene = 'CO';trait_plot_dots(subset(gene_list,Gene==gene)$ID,gene_exp,subset(sample_info,Genotype == 'Col'),name=gene)
+```
+
+
+
+Candidate genes
+```{r}
+genes_to_test = gene_list$ID
+data = log2_gene_exp[genes_to_test,]
+rownames(data) = gene_list$Gene
+
+std_data_candidates = get_std_data(data,sample_info$ExpID)
+
+results_candidates = JTK_fun(data,sample_info)
+
+trait_plot('PIF4',data,sample_info)
+trait_plot('PIF4',std_data_candidates,sample_info)
+```
+
+
+
+All genes
+```{r}
+data = log2_gene_exp
+
+std_data_All = get_std_data(data,sample_info$ExpID)
+
+results_All = JTK_fun(data,sample_info)
+
+# trait_plot('PIF4',data,sample_info)
+# trait_plot('PIF4',std_data,sample_info)
+```
+
+
+ARACYC
+
+```{r}
+require(GSVA)
+require(org.At.tair.db)
+
+# ARACYC:
+sets = org.At.tairARACYC
+keys = mappedkeys(sets)
+
+gset_list = as.list(sets[keys])
+genes = unique(unlist(gset_list))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+gset_list_ARACYC = gset_list
+
+# std_data = get_std_data(log2_gene_exp[genes,],sample_info$ExpID)
+# colnames(std_data) = colnames(log2_gene_exp)
+
+gsva_ARACYC = c()
+for(expt in levels(sample_info$ExpID)){
+  gsva_ARACYC = cbind(gsva_ARACYC,gsva(expr = log2_gene_exp[,sample_info$ExpID == expt],gset.idx.list = gset_list, method = 'gsva',
+              rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+							no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+            )
+}
+# gsva_ARACYC = gsva(expr = std_data,gset.idx.list = gset_list, method = 'gsva',
+#             rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+# 							no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+data = gsva_ARACYC
+
+std_data = get_std_data(data,sample_info$ExpID)
+std_data_ARACYC = std_data
+
+results_ARACYC = JTK_fun(data,sample_info)
+
+trait_plot('fatty acid &beta;-oxidation II (peroxisome)',std_data,sample_info)
+trait_plot('photorespiration',std_data,sample_info)
+trait_plot('very long chain fatty acid biosynthesis I',std_data,sample_info)
+trait_plot('suberin monomers biosynthesis',std_data,sample_info)
+trait_plot('photosynthesis light reactions',std_data,sample_info)
+trait_plot('cellulose biosynthesis',std_data,sample_info)
+trait_plot('UDP-D-xylose biosynthesis',std_data,sample_info)
+```
+
+
+GO
+
+```{r}
+require(GSVA)
+require(GO.db)
+
+# GO:
+sets = org.At.tairGO2ALLTAIRS
+keys = mappedkeys(sets)
+
+gset_list = as.list(sets[keys])
+genes = unique(unlist(gset_list))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+names(gset_list) = sapply(as.list(GOTERM[names(gset_list)]),function(x) paste(x@Ontology,x@Term,sep='::'))
+
+gset_list_GO = gset_list
+# std_data = get_std_data(log2_gene_exp[genes,],sample_info$ExpID)
+# colnames(std_data) = colnames(log2_gene_exp)
+
+gsva_GO = c()
+for(expt in levels(sample_info$ExpID)){
+  gsva_GO = cbind(gsva_GO,gsva(expr = log2_gene_exp[,sample_info$ExpID == expt],gset.idx.list = gset_list, method = 'gsva',
+              rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+							no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+            )
+}  
+data = gsva_GO
+
+std_data = get_std_data(data,sample_info$ExpID)
+std_data_GO = std_data
+
+results_GO = JTK_fun(data,sample_info)
+
+trait_plot('BP::photosynthesis, dark reaction',std_data_GO,sample_info)
+trait_plot('BP::photosynthesis, light reaction',std_data_GO,sample_info)
+trait_plot('BP::cold acclimation',std_data_GO,sample_info)
+trait_plot('BP::photosynthesis, light harvesting',std_data_GO,sample_info)
+trait_plot('BP::cell wall pectin metabolic process',std_data_GO,sample_info)
+trait_plot('BP::photosystem II repair',std_data_GO,sample_info)
+trait_plot('BP::ATP synthesis coupled electron transport',std_data_GO,sample_info)
+trait_plot('BP::response to heat',std_data_GO,sample_info)
+trait_plot('BP::heat acclimation',std_data_GO,sample_info)
+trait_plot('BP::cellular response to heat',std_data_GO,sample_info)
+trait_plot('BP::response to cold',std_data_GO,sample_info)
+trait_plot('BP::cold acclimation',std_data_GO,sample_info)
+trait_plot('BP::cellular response to cold',std_data_GO,sample_info)
+trait_plot('BP::response to osmotic stress',std_data_GO,sample_info)
+trait_plot('BP::regulation of response to stress',std_data_GO,sample_info)
+trait_plot('BP::regulation of cellular response to stress',std_data_GO,sample_info)
+```
+
+
+```{r}
+results = results_candidates
+results = results_All
+results = results_ARACYC
+results = results_GO
+
+results_list = list(candidates = results_candidates,
+                    All = results_All,
+                    ARACYC = results_ARACYC,
+                    GO = results_GO)
+std_data_list = list(candidates = std_data_candidates,
+                    All = std_data_All,
+                    ARACYC = std_data_ARACYC,
+                    GO = std_data_GO)
+
+for(type in c('candidates','ARACYC','GO')) {
+  print(type)
+  results = results_list[[type]]
+  std_data = std_data_list[[type]]
+  
+  cyc_traits = sig_traits(results,1e-3)
+  cyc_traits = order_traits(results[cyc_traits,,],1)
+  cyc_results = results[cyc_traits,,]
+  
+  std_data_cycle = std_data[cyc_traits,]
+  
+  image(t(std_data_cycle))
+  boxplot(-log10(results[,,'BH.Q']))
+  
+  amp_effects = get_amp_effects(results)
+  plot(amp_effects[,1],-log10(amp_effects[,2]))
+  
+  lag_effects = get_lag_effects(results)
+  hist(lag_effects[,1])
+}
+
+head(amp_effects[order(amp_effects[,1]),],n=40)
+tail(amp_effects[order(amp_effects[,1]),],n=40)
+```
+
+```{r}
+require(reshape2)
+r_All_tall = melt(results_All[,,'BH.Q'])
+r_GO_tall = melt(results_GO[,,'BH.Q'])
+r_ARACYC_tall = melt(results_ARACYC[,,'BH.Q'])
+
+r_tall = rbind(data.frame(r_All_tall,Type = 'Gene'),
+               data.frame(r_GO_tall,Type = 'GO'),
+               data.frame(r_ARACYC_tall,Type = 'AraCyc'))
+r_tall$X2 = as.character(r_tall$X2)
+r_tall$Genotype = sapply(r_tall$X2,function(x) strsplit(x,'_')[[1]][1])
+r_tall$Treatment = sapply(r_tall$X2,function(x) strsplit(x,'_')[[1]][2])
+r_tall$Sampling.Day = sapply(r_tall$X2,function(x) strsplit(x,'_')[[1]][3])
+
+ggplot(r_tall,aes(x=interaction(Treatment,Genotype,Sampling.Day),y=-log10(value))) + geom_boxplot(aes(fill = Type)) + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+ggplot(r_tall,aes(x=interaction(Genotype,Sampling.Day,Type),y=-log10(value))) + geom_boxplot(aes(fill = Treatment)) + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+```{r}
+cor(results_All[,,'BH.Q'],method='s')[c(4,11,18)]
+cor(results_GO[,,'BH.Q'],method='s')[c(4,11,18)]
+cor(results_ARACYC[,,'BH.Q'],method='s')[c(4,11,18)]
+
+# with(sample_info,interaction(ExpID,ZT))
+# sample_info$GT = with(sample_info,interaction(Genotype,Sampling.Day))
+# for(gt in unique(sample_info$GT)){
+#   i = sample_info$GT == gt
+#   tapply()
+#   a
+# }
+
+```
+
+Downstream_targets_plots
+```{r}
+plot_targetSets = function(gene_lists,gsva = T,ids = NULL) {
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+if(gsva) {
+  gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+              rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+  						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+  
+  groups = with(sample_info,interaction(Sampling.Day,drop = T))
+  
+  data = gsva_targets
+} else {
+  mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+  data = mean_targets
+}
+
+if(length(ids) > 0) {
+  for(id in ids){
+    if(id %in% rownames(log2_gene_exp))  data = rbind(data,log2_gene_exp[id,])
+  }
+  rownames(data)[(nrow(data)-length(ids)+1):nrow(data)] = unlist(ids)
+}
+  
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+diag(cor(var_effects[,1:length(ids)],var_effects[,-c(1:length(ids))]))
+
+tall_data = melt(t(std_data))
+
+tall_data$Downstream = T
+tall_data$Downstream[tall_data$X2 %in% ids] = F
+tall_data$Group = tall_data$X2
+tall_data$Group[tall_data$X2 %in% ids] = names(ids)[match(tall_data$Group[tall_data$X2 %in% ids],ids)]
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+p1 = ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment,Downstream)),se=F) + facet_grid(Group~Genotype + Sampling.Day)
+print(p1)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+p2 = ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+print(p2)
+
+return(list(p1,p2))
+}
+
+```
+
+
+```{r}
+gene_lists_binding = list()
+gene_sets_expression = list()
+```
+
+**Goal:** measure FRI effects in constant and Variable
+
+- only using the first day's data
+- separate FRI effects at each time point
+- single model run
+- voom method
+
+```{r}
+require(limma)
+require(org.At.tair.db)
+sub_sample_info = subset(sample_info,Sampling.Day == '2014-02-26')
+sub_gene_exp = gene_exp[,sub_sample_info$sample]
+sub_gene_exp = sub_gene_exp[rowMeans(sub_gene_exp) > 1,]
+design = model.matrix(~0+ZT + ZT:Treatment+ZT:Treatment:Genotype,sub_sample_info)
+
+voom_res = voom(sub_gene_exp,design = design,lib.size = mean(colSums(sub_gene_exp)),normalize.method = "none",plot = T)
+
+fit = lmFit(voom_res,design)
+fit = eBayes(fit)
+#FLC
+topTable(fit,coef=13,number = Inf,sort.by = 'none')['AT5G10140',]
+
+all_genes = topTable(fit,coef = 13:24,number = Inf)
+
+sig_genes = topTable(fit,coef = 13:24,number = Inf,p.value = 1e-2)
+
+chrloc = org.At.tairCHRLOC
+mapped_keys = mappedkeys(chrloc)
+gene_loc = sapply(rownames(sig_genes),function(y) chrloc[[y]])
+
+loc_info = data.frame(Gene = names(gene_loc),Symbol = NA, Chr = as.numeric(sapply(gene_loc,function(x) ifelse(is.null(x),NA,names(x)[1]))),Loc = sapply(gene_loc,function(x) ifelse(is.null(x),NA,x[[1]])),stringsAsFactors = F)
+loc_info[order(loc_info$Chr,loc_info$Loc),]
+
+introgression_genes = subset(loc_info,Chr == 4 & abs(Loc) < 1000000)$Gene
+
+FLC = unlist(sig_genes['AT5G10140',])
+sig_genes = sig_genes[!rownames(sig_genes) %in% introgression_genes,] #rownames(sig_genes) != 'AT5G10140' & 
+Con_effects = sig_genes[,grep('TreatmentCon',colnames(sig_genes))]
+Var_effects = sig_genes[,grep('TreatmentVar',colnames(sig_genes))]
+
+dim(Con_effects)
+diag(cor(Con_effects,Var_effects))
+
+plot(unlist(Con_effects),unlist(Var_effects));abline(0,1)
+points(FLC[colnames(Con_effects)],FLC[colnames(Var_effects)],pch=21,bg=2);abline(0,1)
+
+sig_genes_FRI = sig_genes
+
+gene_lists = list(FRI_up = rownames(sig_genes)[rowMeans(Con_effects)>0],
+                 FRI_down = rownames(sig_genes)[rowMeans(Con_effects)<0])
+a=plot_targetSets(gene_lists,ids = c(FLC=gene_list$ID[gene_list$Gene=='FLC']))
+gene_sets_expression = c(gene_sets_expression,gene_lists)
+```
+
+
+
+```{r}
+require(limma)
+require(org.At.tair.db)
+i = sample_info$Sampling.Day != "2014-03-10"
+design = model.matrix(~0+ZT + ZT:Treatment+ZT:Genotype + Treatment:Genotype + ZT:Treatment:Genotype,sample_info[i,])
+
+gsva_data = gsva(expr = log2_gene_exp[,i],gset.idx.list = gset_list_GO, method = 'gsva',
+              rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+							no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+voom_res = voom(gene_exp[,i],design = design,lib.size = mean(colSums(gene_exp)),normalize.method = "none",plot = T)
+
+fit = lmFit(voom_res,design)
+fit = eBayes(fit)
+#FLC
+topTable(fit,coef=13,number = Inf,sort.by = 'none')['AT5G10140',]
+
+all_genes = topTable(fit,coef = 25:30,number = Inf)
+
+sig_genes = topTable(fit,coef = 13:24,number = Inf,p.value = 1e-2)
+gene = rownames(sig_genes)[1];trait_plot(gene,gene_exp,sample_info,name=gene,lineType = 'ExpID')
+
+trait_plot('BP::ubiquinone metabolic process',gsva_data,sample_info,name='BP::quinone metabolic process',lineType = 'Genotype')
+
+chrloc = org.At.tairCHRLOC
+mapped_keys = mappedkeys(chrloc)
+gene_loc = sapply(rownames(sig_genes),function(y) chrloc[[y]])
+
+loc_info = data.frame(Gene = names(gene_loc),Symbol = NA, Chr = as.numeric(sapply(gene_loc,function(x) ifelse(is.null(x),NA,names(x)[1]))),Loc = sapply(gene_loc,function(x) ifelse(is.null(x),NA,x[[1]])),stringsAsFactors = F)
+loc_info[order(loc_info$Chr,loc_info$Loc),]
+
+introgression_genes = subset(loc_info,Chr == 4 & abs(Loc) < 1000000)$Gene
+
+FLC = unlist(sig_genes['AT5G10140',])
+sig_genes = sig_genes[!rownames(sig_genes) %in% introgression_genes,] #rownames(sig_genes) != 'AT5G10140' & 
+Con_effects = sig_genes[,grep('TreatmentCon',colnames(sig_genes))]
+Var_effects = sig_genes[,grep('TreatmentVar',colnames(sig_genes))]
+
+dim(Con_effects)
+diag(cor(Con_effects,Var_effects))
+
+plot(unlist(Con_effects),unlist(Var_effects));abline(0,1)
+points(FLC[colnames(Con_effects)],FLC[colnames(Var_effects)],pch=21,bg=2);abline(0,1)
+
+sig_genes_FRI = sig_genes
+
+gene_lists = list(FRI_up = rownames(sig_genes)[rowMeans(Con_effects)>0],
+                 FRI_down = rownames(sig_genes)[rowMeans(Con_effects)<0])
+a=plot_targetSets(gene_lists,ids = c(FLC=gene_list$ID[gene_list$Gene=='FLC']))
+gene_sets_expression = c(gene_sets_expression,gene_lists)
+```
+
+
+
+
+
+```{r,fig.width=3.5,fig.height=3.5}
+target_genes = sub('.csv','',list.files(path='ATTHED_lists/'))
+gene_lists = list()
+ids = list()
+for(gene in target_genes){
+  new_list = read.csv(sprintf('ATTHED_lists/%s.csv',gene))
+  gene_lists[[gene]] = toupper(as.character(new_list$Locus[new_list$Ath.m < 400 & new_list$Ath.m > 0]))
+  gene_lists[[gene]] = gene_lists[[gene]][gene_lists[[gene]] %in% rownames(log2_gene_exp)]
+  ids[[gene]] = toupper(as.character(new_list$Locus[1]))
+}
+ids = unlist(ids)
+# topTable(fit,coef=13:24,number = Inf,sort.by = 'none')[gene_lists$FLC,]
+
+gene_lists_ATTHED = gene_lists
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+data = mean_targets
+
+for(id in ids){
+  data = rbind(data,log2_gene_exp[id,])
+}
+rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+diag(cor(var_effects[,1:length(ids)],var_effects[,-c(1:length(ids))]))
+
+tall_data = melt(t(std_data))
+
+tall_data$Downstream = T
+tall_data$Downstream[tall_data$X2 %in% ids] = F
+tall_data$Group = tall_data$X2
+tall_data$Group[tall_data$X2 %in% ids] = names(ids)[match(tall_data$Group[tall_data$X2 %in% ids],ids)]
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment,Downstream)),se=F) + facet_grid(Group~Genotype + Sampling.Day + Downstream)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+
+trait_plot(trait = 'AT5G15840',std_data = std_data,sample_info = sample_info,name = 'CO')
+
+```
+
+
+
+```{r}
+svp_FLC = read.csv('Mateo_et_al/WT_svp_Leaf_LD.csv',stringsAsFactors = F)
+SVP_flc = read.csv('Mateo_et_al/WT_flc_Leaf_LD.csv',stringsAsFactors = F)
+svp_flc = read.csv('Mateo_et_al/WT_svpflc_Leaf_LD.csv',skip=1,stringsAsFactors = F)
+
+gene_lists = list()
+gene_lists$svp_FLC_up   = svp_FLC[svp_FLC[,2] > 0 & svp_FLC[,3] < 1e-2,1]
+gene_lists$svp_FLC_down = svp_FLC[svp_FLC[,2] < 0 & svp_FLC[,3] < 1e-2,1]
+gene_lists$SVP_flc_up   = SVP_flc[SVP_flc[,2] > 0 & SVP_flc[,3] < 1e-2,1]
+gene_lists$SVP_flc_down = SVP_flc[SVP_flc[,2] < 0 & SVP_flc[,3] < 1e-2,1]
+gene_lists$svp_flc_up   = svp_flc[svp_flc[,2] > 0 & svp_flc[,3] < 1e-2,1]
+gene_lists$svp_flc_down = svp_flc[svp_flc[,2] < 0 & svp_flc[,3] < 1e-2,1]
+
+svp_FLC_up_temp = gene_lists$svp_FLC_up[!gene_lists$svp_FLC_up %in% gene_lists$SVP_flc_up]
+gene_lists$SVP_flc_up = gene_lists$SVP_flc_up[!gene_lists$svp_FLC_up %in% gene_lists$SVP_flc_up]
+gene_lists$svp_FLC_up = svp_FLC_up_temp
+
+gene_lists = sapply(gene_lists,function(x) x[x %in% rownames(log2_gene_exp)])
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+# data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)),labels = c(0,4,8,12,16,20))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+
+```
+
+
+```{r}
+svp_FLC = read.csv('Mateo_et_al/WT_svp_Leaf_LD.csv',stringsAsFactors = F)
+SVP_flc = read.csv('Mateo_et_al/WT_flc_Leaf_LD.csv',stringsAsFactors = F)
+svp_flc = read.csv('Mateo_et_al/WT_svpflc_Leaf_LD.csv',skip=1,stringsAsFactors = F)
+binding_sites = read.csv('Mateo_et_al/SVP_FLC_binding_sites.csv',stringsAsFactors = F)
+svp_binding = na.omit(subset(binding_sites,Gene == 'SVP' & Background == 'FRI SVP FLC')$Target)
+flc_binding = na.omit(subset(binding_sites,Gene == 'FLC' & Background == 'FRI SVP FLC ')$Target)
+
+gene_lists = list()
+gene_lists$svp_FLC_up   = svp_FLC[svp_FLC[,2] > 0 & svp_FLC[,3] < 1e-2,]
+# gene_lists$svp_FLC_down = svp_FLC[svp_FLC[,2] < 0 & svp_FLC[,3] < 1e-2,]
+gene_lists$SVP_flc_up   = SVP_flc[SVP_flc[,2] > 0 & SVP_flc[,3] < 1e-2,]
+# gene_lists$SVP_flc_down = SVP_flc[SVP_flc[,2] < 0 & SVP_flc[,3] < 1e-2,]
+gene_lists$svp_flc_up   = svp_flc[svp_flc[,2] > 0 & svp_flc[,3] < 1e-2,]
+# gene_lists$svp_flc_down = svp_flc[svp_flc[,2] < 0 & svp_flc[,3] < 1e-2,]
+
+# SVP_flc_up = gene_lists$SVP_flc_up[!rownames(gene_lists$SVP_flc_up) %in% rownames(gene_lists$svp_FLC_up),]
+# svp_FLC_up = gene_lists$svp_FLC_up[!rownames(gene_lists$svp_FLC_up) %in% rownames(gene_lists$SVP_flc_up),]
+# gene_lists$SVP_flc_up = SVP_flc_up
+# gene_lists$svp_FLC_up = svp_FLC_up
+
+
+sapply(gene_lists,dim)
+# 
+gene_lists$svp_FLC_up = gene_lists$svp_FLC_up[gene_lists$svp_FLC_up[,1] %in% svp_binding,]
+# gene_lists$svp_FLC_down = gene_lists$svp_FLC_down[gene_lists$svp_FLC_down[,1] %in% svp_binding,]
+gene_lists$SVP_flc_up = gene_lists$SVP_flc_up[gene_lists$SVP_flc_up[,1] %in% flc_binding,]
+# gene_lists$SVP_flc_down = gene_lists$SVP_flc_down[gene_lists$SVP_flc_down[,1] %in% flc_binding,]
+gene_lists$svp_flc_up = gene_lists$svp_flc_up[gene_lists$svp_flc_up[,1] %in% svp_binding & gene_lists$svp_flc_up[,1] %in% flc_binding,]
+# gene_lists$svp_flc_down = gene_lists$svp_flc_down[gene_lists$svp_flc_down[,1] %in% svp_binding & gene_lists$svp_flc_down[,1] %in% flc_binding,]
+
+sapply(gene_lists,dim)
+
+gene_lists = lapply(gene_lists,function(x) x[x[,1] %in% rownames(log2_gene_exp),])
+
+require(reshape)
+require(ggplot2)
+
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x[,1],],groups)*abs(x[,2]))))
+
+data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+
+```
+
+
+
+```{r}
+require(readxl)
+require(gdata)
+
+iFLMB = read.xls('Pose_et_al/nature12633-s3.xlsx',sheet = 'iBeta +-3kb fdr<0.1',stringsAsFactors=F)
+iFLMd = read.xls('Pose_et_al/nature12633-s3.xlsx',sheet = 'iDelta +-3kb fdr<0.1',stringsAsFactors=F)
+gFLM = read.xls('Pose_et_al/nature12633-s2.xlsx',sheet = 'Genes +-3kb fdr<0.1',stringsAsFactors=F)
+Tao_SVP = data.frame(read_excel('Pose_et_al/TPJ_4919_sm_TableS1.xlsx',sheet = 'SVP',skip=0))
+Tao_SOC1 = data.frame(read_excel('Pose_et_al/TPJ_4919_sm_TableS1.xlsx',sheet = 'SOC1',skip=0))
+Mateo_binding_sites = read.csv('Mateo_et_al/SVP_FLC_binding_sites.csv',stringsAsFactors = F)
+Mateo_svp = na.omit(subset(Mateo_binding_sites,Gene == 'SVP' & Background == 'FRI SVP FLC')$Target)
+Mateo_flc = na.omit(subset(Mateo_binding_sites,Gene == 'FLC' & Background == 'FRI SVP FLC ')$Target)
+
+gene_lists = list()
+# gene_lists$iFLMB = iFLMB$up.down_AGI
+# gene_lists$iFLMd = iFLMd$up.down_AGI
+gene_lists$gFLM = gFLM$up.down_AGI
+# gene_lists$SVP = Tao_SVP$AGI
+# gene_lists$SOC1 = Tao_SOC1$AGI
+gene_lists$Mateo_SVP = Mateo_svp#[Mateo_svp %in% Mateo_flc == F]
+gene_lists$Mateo_FLC = Mateo_flc#[Mateo_flc %in% Mateo_svp == F]
+
+
+gene_lists = lapply(gene_lists,function(x) x[x %in% rownames(log2_gene_exp)])
+sapply(gene_lists,length)
+
+gene_lists_binding$FLM = gene_lists$gFLM
+gene_lists_binding$SVP = gene_lists$Mateo_SVP
+gene_lists_binding$FLC = gene_lists$Mateo_FLC
+
+# gene_lists = lapply(letters[1:6],function(x) sample(rownames(log2_gene_exp),100))
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+# std_data = data
+std_data = get_std_data(data,groups)
+# colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+
+```
+
+
+```{r}
+
+require(readxl)
+require(gdata)
+
+gene_lists = list()
+
+gene_lists$PIF1_binding = data.frame(read_excel('Pfeiffer_et_al/mmc2.xlsx',sheet = 'A-PIF1',skip=1))$GeneID
+gene_lists$PIF3_binding = data.frame(read_excel('Pfeiffer_et_al/mmc2.xlsx',sheet = 'B-PIF3',skip=1))$GeneID
+gene_lists$PIF4_binding = data.frame(read_excel('Pfeiffer_et_al/mmc2.xlsx',sheet = 'C-PIF4',skip=1))$GeneID
+gene_lists$PIF5_binding = data.frame(read_excel('Pfeiffer_et_al/mmc2.xlsx',sheet = 'D-PIF5',skip=1))$Gene.ID
+
+all_targets = read.xls('Pfeiffer_et_al/mmc4.xlsx',skip=0,stringsAsFactors=F)
+gene_lists$all_targets_up = subset(all_targets,log2(X.FC..pifq.wt.) <= -2)[,1]
+gene_lists$all_targets_down = subset(all_targets,log2(X.FC..pifq.wt.) >= 2)[,1]
+
+gene_lists = lapply(gene_lists,function(x) x[x %in% rownames(log2_gene_exp)])
+sapply(gene_lists,length)
+
+gene_lists_binding$PIF4_up = gene_lists$all_targets_up
+gene_lists_binding$PIF4_down = gene_lists$all_targets_down
+
+# gene_lists = lapply(letters[1:6],function(x) sample(rownames(log2_gene_exp),100))
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=10000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+# data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+
+```
+
+
+```{r}
+gene_lists = gene_lists_binding
+# gene_lists = lapply(gene_lists,function(x) x[,1])
+sapply(gene_lists,length)
+Design = sapply(gene_lists,function(x) rownames(log2_gene_exp) %in% x)+0
+
+X = solve(t(Design) %*% Design) %*% t(Design)
+
+std_data = get_std_data(log2_gene_exp,groups)
+colnames(std_data) = colnames(data)
+
+data = apply(std_data,2,function(x) X %*% x)
+rownames(data) = names(gene_lists)
+
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+```
+
+
+```{r,fig.width=3.5,fig.height=3.5}
+gene_lists = gene_lists_binding
+# gene_lists = c(gene_lists,gene_sets_expression)
+# gene_lists$FLC2 = rownames(sig_genes_FRI)
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+# gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+#             rnaseq = F, abs.ranking=F,min.sz=10,max.sz=1000,
+# 						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,,drop=F],groups))))
+
+# data = gsva_targets
+data = mean_targets
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+tall_data$Group = factor(tall_data$Group,levels = c('FLC','FLM','SVP','PIF4_down','PIF4_up'))
+ggplot(subset(tall_data,Genotype == 'ColFRI' & Sampling.Day == '2014-02-26'),aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_wrap(~Group)
+
+
+trait_plot('FLM',std_data,sample_info)
+trait_plot('SVP',std_data,sample_info)
+trait_plot('FLC',std_data,transform(sample_info,Genotype = factor(Genotype,levels = c('ColFRI','Col'))),lineType = 'Genotype')
+trait_plot('PIF4_down',std_data,sample_info)
+trait_plot('PIF4_up',std_data,sample_info)
+
+trait_plot_dots('FLM',std_data,subset(sample_info,Genotype == 'ColFRI' & Sampling.Day == '2014-02-26'),log=F)
+trait_plot_dots('SVP',std_data,subset(sample_info,Genotype == 'ColFRI' & Sampling.Day == '2014-02-26'),log=F)
+
+trait_plot(gene_list$ID[gene_list$Gene == 'FLM'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'SVP'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'FLC'],log2_gene_exp,subset(sample_info,Genotype != 'Col'))
+trait_plot(gene_list$ID[gene_list$Gene == 'PIF4'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'LHY'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'PRR5'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'LUX'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'ELF3'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'ELF4'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'GI'],log2_gene_exp,sample_info)
+trait_plot(gene_list$ID[gene_list$Gene == 'CO'],log2_gene_exp,sample_info)
+
+```
+
+
+
+Heat shock Pietzenuk_et_al
+```{r}
+require(readxl)
+require(limma)
+require(edgeR)
+gxp_input = data.frame(read_excel('Pietzenuk_et_al/GSE69077_thaliana_gene_t10-2_corrected.xlsx',skip=1))
+gxp_data = gxp_input[,c(6:11)]
+rownames(gxp_data) = gxp_input$gene_name
+samples = data.frame(Type = c('Heat','Heat','_Recovery','_Recovery')) #'_Ref','_Ref',
+mm = model.matrix(~Type,samples)
+
+norm.factors = calcNormFactors(gxp_data,method='TMM',lib.size = colSums(gxp_data))
+
+
+gxp_DGElist = DGEList(gxp_data,norm.factors = norm.factors,group = samples$Type)
+plotSmear(object = gxp_DGElist)
+voom_res = voom(gxp_data,design = mm,lib.size = colSums(gxp_data)/norm.factors,plot=T)
+
+i = sample(1:nrow(gxp_data),1000)
+plot(voom_res$E[i,1],voom_res$E[i,2])
+plot(voom_res$E[i,1],voom_res$E[i,3])
+plot(voom_res$E[i,1],voom_res$E[i,4])
+plot(voom_res$E[i,3],voom_res$E[i,4])
+
+fit = lmFit(voom_res,mm)
+fit = eBayes(fit)
+
+topTable(fit,coef=2)
+temp_tests = topTable(fit,coef=2,number = Inf,sort.by = 'P',p.value = 1e-2)
+sum(temp_tests$adj.P.Val < 1e-5)
+hist(temp_tests$adj.P.Val,breaks=100)
+hist(temp_tests$logFC,breaks=100)
+
+head(subset(temp_tests,logFC > 2 & adj.P.Val < 1e-2),n=100)
+head(subset(temp_tests,logFC < -2 & adj.P.Val < 1e-2),n=100)
+
+gene_lists = list(Heat_up = rownames(head(subset(temp_tests,logFC > 2 & adj.P.Val < 1e-2),n=100)),
+                 Heat_down = rownames(head(subset(temp_tests,logFC < -2 & adj.P.Val < 1e-2),n=100)))
+
+gene_lists = lapply(gene_lists,function(x) x[x %in% rownames(log2_gene_exp)])
+sapply(gene_lists,length)
+
+
+# gene_lists = lapply(letters[1:6],function(x) sample(rownames(log2_gene_exp),100))
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=10000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+
+
+```
+
+Heat shock Nguyen_et_al
+```{r}
+require(readxl)
+
+gxp_data = data.frame(read_excel('Nguyen_et_al/pcp-2015-e-00111-File011.xls',skip=2))
+gxp_data$Response = gxp_data$heat.stress.a. - gxp_data$Non.stress.a.
+gxp_data = gxp_data[order(-gxp_data$Response),]
+
+head(gxp_data)
+
+gene_lists = list(Heat_5 = subset(gxp_data,Response > 5)$AGI.code,
+                  Heat_4_5 = subset(gxp_data,Response >= 4 & Response < 5)$AGI.code,
+                  Heat_3_4 = subset(gxp_data,Response >= 3 & Response < 4)$AGI.code,
+                  Heat_2_3 = subset(gxp_data,Response >= 2 & Response < 3)$AGI.code,
+                  Heat_1_2 = subset(gxp_data,Response >= 1 & Response < 2)$AGI.code,
+                  Heat_0_1 = subset(gxp_data,Response >= 0 & Response < 1)$AGI.code)
+
+gene_lists = lapply(gene_lists,function(x) x[x %in% rownames(log2_gene_exp)])
+sapply(gene_lists,length)
+
+
+# gene_lists = lapply(letters[1:6],function(x) sample(rownames(log2_gene_exp),100))
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=10000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+# data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+```
+
+Cold Chan et al
+```{r}
+require(readxl)
+
+gxp_data = data.frame(read_excel('Chan_et_al/nph13727-sup-0002-TablesS1-S8.xlsx',sheet = 2,skip=2))[,c(8,9,16)]
+colnames(gxp_data) = c('Fold_change','p_value','AGI')
+gxp_data = gxp_data[order(gxp_data$p_value),]
+gxp_data$BH = p.adjust(gxp_data$p_value,method='BH')
+gxp_data = subset(gxp_data,AGI %in% rownames(log2_gene_exp))
+
+head(gxp_data)
+
+gene_lists = list(Cold_up = head(subset(gxp_data,BH< 1e-2 & Fold_change > 0)$AGI,n=20),
+                  Cold_down = head(subset(gxp_data,BH< 1e-2 & Fold_change < 0)$AGI,n=20))
+
+gene_lists = lapply(gene_lists,function(x) x[x %in% rownames(log2_gene_exp)])
+sapply(gene_lists,length)
+
+
+# gene_lists = lapply(letters[1:6],function(x) sample(rownames(log2_gene_exp),100))
+
+require(GSVA)
+require(reshape)
+require(ggplot2)
+
+
+genes = unique(unlist(gene_lists))
+genes = genes[genes %in% rownames(log2_gene_exp)]
+
+gsva_targets = gsva(expr = log2_gene_exp,gset.idx.list = gene_lists, method = 'gsva',
+            rnaseq = F, abs.ranking=F,min.sz=10,max.sz=10000,
+						no.bootstraps=0,parallel.sz=1,mx.diff=T,tau=1,kernel=T,verbose=T)$es.obs
+
+groups = with(sample_info,interaction(Sampling.Day,drop = T))
+mean_targets = do.call(rbind,lapply(gene_lists,function(x) colMeans(get_std_data(log2_gene_exp[x,],groups))))
+
+data = gsva_targets
+data = mean_targets
+# 
+# for(id in ids){
+#   data = rbind(data,log2_gene_exp[id,])
+# }
+# rownames(data)[-c(1:length(ids))] = unlist(ids)
+
+# replace FLM (total) with FLMb?
+# plot(data['AT1G77080',],exp['AT1G77080.4',]);abline(0,1)
+# data['AT1G77080',] = exp['AT1G77080.4',]
+
+std_data = get_std_data(data,groups)
+colnames(std_data) = colnames(data)
+
+design = model.matrix(~0 + ZT:Genotype:Sampling.Day + ZT:Genotype:Sampling.Day:Treatment,sample_info)
+design = design[,colSums(design) > 0]
+var_coefs = colnames(design)[grep('TreatmentVar',colnames(design))]
+var_effects = apply(std_data,1,function(x) coef(lm(x~0+design))[paste0('design',var_coefs)])
+var_SEs = apply(std_data,1,function(x) summary(lm(x~0+design))$coef[paste0('design',var_coefs),2])
+
+
+tall_data = melt(t(std_data))
+
+tall_data$Group = tall_data$X2
+tall_data = droplevels(tall_data)
+tall_data$ZT = sample_info$ZT[match(tall_data$X1,sample_info$sample)]
+tall_data$Genotype = sample_info$Genotype[match(tall_data$X1,sample_info$sample)]
+tall_data$Treatment = sample_info$Treatment[match(tall_data$X1,sample_info$sample)]
+tall_data$Sampling.Day = sample_info$Sampling.Day[match(tall_data$X1,sample_info$sample)]
+
+ggplot(tall_data,aes(x=ZT,y = value)) + geom_smooth(aes(color = Treatment,group=interaction(Treatment)),se=T) + facet_grid(Group~Genotype + Sampling.Day)
+
+
+tall_effects = melt(var_effects)
+tall_SEs = melt(var_SEs)
+tall_effects$SE = tall_SEs$value
+tall_effects$Downstream = T
+tall_effects$Downstream[tall_effects$X2 %in% ids] = F
+tall_effects$Group = tall_effects$X2
+tall_effects$Group[tall_effects$X2 %in% ids] = names(ids)[match(tall_effects$Group[tall_effects$X2 %in% ids],ids)]
+tall_effects = droplevels(tall_effects)
+tall_effects$X1 = as.character(tall_effects$X1)
+tall_effects$ZT = sub('design','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][1]))
+tall_effects$ZT = factor(tall_effects$ZT,levels = paste0('ZT',c(0,4,8,12,16,20)))
+tall_effects$Genotype = sub('Genotype','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][2]))
+tall_effects$Sampling.Day = sub('Sampling.Day','',sapply(tall_effects$X1,function(x) strsplit(x,':')[[1]][3]))
+
+ggplot(subset(tall_effects,Downstream),aes(x=ZT,y = value)) + geom_ribbon(aes(ymax = value + 2*SE,ymin = value - 2*SE,group=Downstream),fill = 'grey80') + geom_line(aes(color = Downstream,group=Downstream)) + facet_grid(Group~Genotype + Sampling.Day) + geom_hline(yintercept=0)
+```
+
+Neither `lsb` (lomb) nor `cosopt` are successful
+
+```{r}
+require(cosopt)
+
+# genes_to_test = gene_list$ID
+genes_to_test = 1:nrow(gene_exp)
+Expts = as.character(unique(sample_info$ExpID))
+Expts = c(Expts[grep('Con',Expts)],Expts[grep('Var',Expts)])
+sample_info$ExpID = factor(sample_info$ExpID,levels = Expts)
+results = array(NA,dim = c(length(genes_to_test),length(Expts),4), dimnames = list(genes[genes_to_test],Expts,c('BH.Q','ADJ.P','LAG','AMP')))
+# dimnames(results)[[1]] = genes_to_test
+# dimnames(results)[[1]] = gene_list$Gene
+
+for(expt in Expts) {
+  sub_sample_info = droplevels(subset(sample_info,ExpID == expt))
+  if(nrow(sub_sample_info) == 0) next
+  sub_sample_info = sub_sample_info[order(sub_sample_info$ZT),]
+  data = gene_exp[genes_to_test,sub_sample_info$sample]
+  rownames(data) = gene_list$Gene
+  
+  cosopt(c(data['LHY',]),rep(0.1,ncol(data)),as.numeric(sub_sample_info$ZT))
+  # res = lsp(x=data['PRR5',],times = as.numeric(sub_sample_info$ZT),from=0,to=24,type = 'frequency')
+ 
+}
+
+```
+
+
+
+```{r echo = F,warning=}
+require(org.At.tair.db)
+require(reactome.db)
+require(KEGG.db)
+require(GO.db)
+# KEGGPATHID2NAME[['01110']]
+# GOTERM[['GO:0000002']]@Term
+# x <- org.At.tairARACYC
+# x <- org.At.tairPATH
+# x <- org.At.tairGO
+# x = org.At.tairGO2ALLTAIRS
+#  
+# mapped_tairs <- mappedkeys(x)
+# x[[mapped_tairs[1]]]
+
+```
+
+
